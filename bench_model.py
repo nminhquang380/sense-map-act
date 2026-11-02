@@ -293,9 +293,18 @@ def main():
     res = {"name": args.name, "source": source, "params_M": n_params / 1e6, "args": vars(args),
            "hardware": hardware_info(), "modes": []}
     ref = None
+    res["failed_modes"] = []
     for mode in modes:
-        print(f"--- {mode}")
-        r, out = run_mode(mode, builder, args, state, ref)
+        print(f"--- {mode}", flush=True)
+        try:
+            r, out = run_mode(mode, builder, args, state, ref)
+        except Exception as e:  # e.g. CUDA OOM in FP32, torch.compile without a C compiler
+            msg = f"{type(e).__name__}: {str(e).splitlines()[0][:300] if str(e) else ''}"
+            print(f"  [skipped] {mode}: {msg}", flush=True)
+            res["failed_modes"].append({"mode": mode, "error": msg})
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
         if mode == "cpu_fp32":
             ref = out
         res["modes"].append(r)

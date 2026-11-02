@@ -2,19 +2,57 @@
 
 Mục tiêu: đo **cái GPU làm được** cho ba công trình đã công bố. Kết quả accuracy đã có sẵn trong paper, không cần chạy lại.
 
-## Cài đặt (máy 4×RTX 3090)
+## Cài đặt trên server mới (không cần sudo)
 
+**Bước 0: xem driver.** Chạy `nvidia-smi` và ghi lại `CUDA Version` ở góc trên bên phải. Đó là phiên bản CUDA cao nhất mà driver hỗ trợ.
+
+**Bước 1: Miniforge (conda, chỉ cài một lần).**
 ```bash
-pip install torch numpy matplotlib          # nếu chưa có
-pip install sionna-rt                       # tuỳ chọn, cho khối 5
-bash run_all.sh                             # hoặc chạy từng khối bên dưới
+cd ~
+wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+bash Miniforge3-Linux-x86_64.sh -b -p $HOME/miniforge3
+$HOME/miniforge3/bin/conda init bash && source ~/.bashrc
 ```
 
-Chạy thử nhanh trước (khoảng 1 phút) để chắc không lỗi:
+**Bước 2: môi trường riêng.**
+```bash
+conda create -n smact python=3.12 -y
+conda activate smact
+```
 
+**Bước 3: PyTorch đúng với driver.** Chọn **một** dòng theo `CUDA Version` ở bước 0:
+```bash
+pip install torch                                                     # CUDA Version >= 13.0
+pip install torch --index-url https://download.pytorch.org/whl/cu128  # 12.8 – 12.9
+pip install torch --index-url https://download.pytorch.org/whl/cu126  # 12.6 – 12.7
+```
+Driver cũ hơn 12.6: nhờ quản trị server cập nhật driver.
+
+**Bước 4: thư viện còn lại, LLVM cho Sionna RT trên CPU, và code.**
+```bash
+pip install numpy matplotlib sionna-rt
+conda install -c conda-forge libllvm18 -y
+conda env config vars set DRJIT_LIBLLVM_PATH=$(ls $CONDA_PREFIX/lib/libLLVM*.so* | head -1)
+conda deactivate && conda activate smact          # nạp biến môi trường vừa đặt
+git clone https://github.com/nminhquang380/sense-map-act && cd sense-map-act
+python check_env.py
+```
+`check_env.py` in PASS / WARN / FAIL cho từng mục. Chỉ cần sửa các dòng **FAIL**. Dòng WARN của Sionna RT không chặn gì: benchmark Sionna là tuỳ chọn. Nếu thiếu `gcc` (chế độ `torch.compile` sẽ bị bỏ qua): `conda install -c conda-forge gxx -y`.
+
+**Bước 5: chạy thử nhanh (khoảng 1 phút), rồi chạy toàn bộ trong tmux.**
 ```bash
 python bench_marl_env.py --check
 python bench_model.py --name nsadm --small --batch 4 --infer-batch 4 --out results/test.json
+
+tmux new -s bench                        # mất SSH thì job vẫn chạy
+conda activate smact && bash run_all.sh 2>&1 | tee logs_run_all.txt
+# Ctrl-b rồi d để thoát tmux; quay lại bằng: tmux attach -t bench
+```
+Server dùng chung: xem `nvidia-smi` để chọn GPU rảnh, ví dụ `export CUDA_VISIBLE_DEVICES=0,1,2,3` trước khi chạy.
+
+**Bước 6: gửi kết quả.**
+```bash
+zip -r gtc_results.zip results figs logs logs_run_all.txt
 ```
 
 ## Từng khối đo gì

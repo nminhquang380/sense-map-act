@@ -2,11 +2,13 @@
 # Chạy toàn bộ benchmark trên máy 4x RTX 3090. Tổng thời gian ~1-2 giờ (phần lớn là CPU baseline).
 # Có thể chạy từng khối riêng; mỗi khối ghi một file JSON trong results/.
 set -e
+set -o pipefail
 cd "$(dirname "$0")"
 mkdir -p results figs logs
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 
-echo "== 0. Thông tin máy"; nvidia-smi | tee logs/nvidia-smi.txt
+echo "== 0. Kiểm tra môi trường"; nvidia-smi | tee logs/nvidia-smi.txt
+python check_env.py | tee logs/check_env.txt || { echo "Môi trường chưa sẵn sàng: xem các dòng FAIL ở trên"; exit 1; }
 
 echo "== 1. MARL env (ICCC'26): kiểm tra tương đương + throughput + quét N  (~10-20 phút)"
 CUDA_VISIBLE_DEVICES=0 python bench_marl_env.py --out results/marl.json | tee logs/marl.txt

@@ -1,0 +1,6 @@
+results/
+figs/
+logs/
+__pycache__/
+*.npz
+*.pyc

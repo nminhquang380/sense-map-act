@@ -130,8 +130,10 @@ class ProxyDRM(nn.Module):
         self.meas = nn.Linear(1 + 3 + 1, d)                      # power + 3D position + time
         self.patch = nn.Linear(patch_vox, d)
         self.pos = nn.Parameter(torch.randn(n_patches, d) * 0.02)
-        enc = nn.TransformerEncoderLayer(d, heads, 4 * d, batch_first=True, norm_first=True)
-        dec = nn.TransformerDecoderLayer(d, heads, 4 * d, batch_first=True, norm_first=True)
+        # dropout=0 keeps PyTorch on the fused (flash) attention kernels on CPU and GPU alike;
+        # with dropout the CPU falls back to materialising every N x N attention matrix (> 400 GB here).
+        enc = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True, norm_first=True)
+        dec = nn.TransformerDecoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True, norm_first=True)
         self.enc = nn.TransformerEncoder(enc, le, enable_nested_tensor=False)
         self.dec = nn.TransformerDecoder(dec, ld)
         self.head = nn.Linear(d, patch_vox)

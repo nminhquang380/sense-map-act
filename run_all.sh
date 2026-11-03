@@ -33,8 +33,8 @@ fi
 
 if want 3; then
   echo "== 3. 3D-DRM (ICC'26): CPU vs GPU  (~20-40 phút, CPU chậm)"
-  # 7.8 M voxel/frame: CPU dùng batch 1 để vừa RAM; tốc độ so sánh theo thời gian mỗi mẫu.
-  CUDA_VISIBLE_DEVICES=0 python bench_model.py --name drm --batch 4 --cpu-batch 1 --infer-batch 2 \
+  # 7.8 M voxel/frame, 7,500 token/frame; CPU và GPU cùng batch 4.
+  CUDA_VISIBLE_DEVICES=0 python bench_model.py --name drm --batch 4 --infer-batch 4 \
       --dataset 18000 --epochs 100 --compile --out results/drm.json | tee logs/drm.txt || fail 3
 fi
 

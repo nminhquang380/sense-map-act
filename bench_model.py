@@ -26,7 +26,11 @@ state on the poster which one you measured).
 """
 import argparse
 import importlib.util
+import json
 import math
+import os
+import subprocess
+import sys
 
 import torch
 import torch.nn as nn
@@ -208,8 +212,10 @@ def run_mode(mode, builder, args, state_dict, ref_out):
     scaler = torch.amp.GradScaler("cuda", enabled=(mode == "gpu_fp16"))
     is_cpu = dev.type == "cpu"
     warm, rep = (1, args.cpu_repeat) if is_cpu else (args.warmup, args.repeat)
+    bs = (args.cpu_batch or args.batch) if is_cpu else args.batch
+    ibs = min(args.infer_batch, bs) if is_cpu else args.infer_batch
     torch.manual_seed(1)
-    batch = to_dev(make_batch(args.batch, torch.device("cpu")), dev)
+    batch = to_dev(make_batch(bs, torch.device("cpu")), dev)
     torch.manual_seed(2)
     b1 = to_dev(make_batch(1, torch.device("cpu")), dev)
     if dev.type == "cuda":
@@ -237,14 +243,14 @@ def run_mode(mode, builder, args, state_dict, ref_out):
         r["train_step"] = time_fn(train_step, dev, warm, rep)
         base_model.load_state_dict(state_dict)
         r["infer_latency_b1"] = time_fn(infer1, dev, warm, rep)
-        bi = make_batch(args.infer_batch, dev)
+        bi = make_batch(ibs, dev)
 
         def inferB():
             model.eval()
             with ctx():
                 infer(model, bi)
         t = time_fn(inferB, dev, warm, max(2, rep // 2))
-        r["infer_throughput_per_s"] = args.infer_batch / (t["median_ms"] / 1e3)
+        r["infer_throughput_per_s"] = ibs / (t["median_ms"] / 1e3)
         # accuracy check against the CPU FP32 reference (same weights, same input)
         base_model.load_state_dict(state_dict)
         out = infer1().float().cpu()
@@ -252,8 +258,9 @@ def run_mode(mode, builder, args, state_dict, ref_out):
             r["rel_err_vs_cpu_fp32"] = float((out - ref_out).norm() / (ref_out.norm() + 1e-12))
     if dev.type == "cuda":
         r["peak_mem_GB"] = torch.cuda.max_memory_allocated() / 1e9
-    steps_per_epoch = math.ceil(args.dataset / args.batch)
-    r["projected_train_s"] = args.epochs * steps_per_epoch * r["train_step"]["median_ms"] / 1e3
+    r["batch"] = bs
+    r["train_ms_per_sample"] = r["train_step"]["median_ms"] / bs
+    r["projected_train_s"] = args.epochs * args.dataset * r["train_ms_per_sample"] / 1e3
     return r, out
 
 
@@ -271,6 +278,12 @@ def main():
     ap.add_argument("--repeat", type=int, default=20)
     ap.add_argument("--cpu-repeat", type=int, default=3)
     ap.add_argument("--small", action="store_true", help="tiny shapes for a quick smoke test")
+    ap.add_argument("--cpu-batch", type=int, default=None,
+                    help="smaller training batch for the CPU baseline (host-RAM limit); speed-ups use per-sample time")
+    ap.add_argument("--no-isolate", action="store_true", help="run all modes in one process (default: one process per mode)")
+    ap.add_argument("--single-mode", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--child-out", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--ref-file", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -290,15 +303,39 @@ def main():
     n_params = sum(p.numel() for p in m0.parameters())
     del m0
 
+    if args.single_mode:   # child process: run exactly one mode, hand back json + output tensor
+        ref = torch.load(args.ref_file) if args.ref_file and os.path.exists(args.ref_file) else None
+        r, out = run_mode(args.single_mode, builder, args, state, ref)
+        torch.save(out, args.child_out + ".pt")
+        json.dump(r, open(args.child_out, "w"))
+        return
+
     res = {"name": args.name, "source": source, "params_M": n_params / 1e6, "args": vars(args),
-           "hardware": hardware_info(), "modes": []}
-    ref = None
-    res["failed_modes"] = []
+           "hardware": hardware_info(), "modes": [], "failed_modes": []}
+    outp = args.out or f"results/{args.name}.json"
+    tmp = os.path.join(os.path.dirname(outp) or ".", f".tmp_{args.name}")
+    os.makedirs(tmp, exist_ok=True)
+    ref, ref_file = None, os.path.join(tmp, "ref_cpu_fp32.pt")
+    if os.path.exists(ref_file):
+        os.remove(ref_file)
     for mode in modes:
         print(f"--- {mode}", flush=True)
         try:
-            r, out = run_mode(mode, builder, args, state, ref)
-        except Exception as e:  # e.g. CUDA OOM in FP32, torch.compile without a C compiler
+            if args.no_isolate:
+                r, out = run_mode(mode, builder, args, state, ref)
+            else:
+                child = os.path.join(tmp, mode + ".json")
+                for f in (child, child + ".pt"):
+                    if os.path.exists(f):
+                        os.remove(f)
+                cmd = [sys.executable, os.path.abspath(__file__)] + sys.argv[1:] + \
+                      ["--single-mode", mode, "--child-out", child, "--ref-file", ref_file]
+                rc = subprocess.run(cmd).returncode
+                if rc != 0 or not os.path.exists(child):
+                    why = "killed by the OS: host RAM exhausted" if rc in (-9, 137) else f"exit code {rc}"
+                    raise RuntimeError(why)
+                r, out = json.load(open(child)), torch.load(child + ".pt")
+        except Exception as e:  # e.g. OOM, torch.compile without a C compiler
             msg = f"{type(e).__name__}: {str(e).splitlines()[0][:300] if str(e) else ''}"
             print(f"  [skipped] {mode}: {msg}", flush=True)
             res["failed_modes"].append({"mode": mode, "error": msg})
@@ -307,17 +344,18 @@ def main():
             continue
         if mode == "cpu_fp32":
             ref = out
+            torch.save(out, ref_file)
         res["modes"].append(r)
-        print(f"  train step {r['train_step']['median_ms']:9.1f} ms | infer b1 "
+        print(f"  train {r['train_ms_per_sample']:9.2f} ms/sample (batch {r['batch']}) | infer b1 "
               f"{r['infer_latency_b1']['median_ms']:9.1f} ms | thr {r['infer_throughput_per_s']:8.1f}/s | "
               f"proj. train {fmt_duration(r['projected_train_s'])}"
-              + (f" | rel.err {r['rel_err_vs_cpu_fp32']:.2e}" if 'rel_err_vs_cpu_fp32' in r else ""))
+              + (f" | rel.err {r['rel_err_vs_cpu_fp32']:.2e}" if 'rel_err_vs_cpu_fp32' in r else ""), flush=True)
     base = next((m for m in res["modes"] if m["mode"] == "cpu_fp32"), None)
     if base:
         for m in res["modes"]:
-            m["train_speedup_vs_cpu"] = base["train_step"]["median_ms"] / m["train_step"]["median_ms"]
+            m["train_speedup_vs_cpu"] = base["train_ms_per_sample"] / m["train_ms_per_sample"]
             m["infer_speedup_vs_cpu"] = base["infer_latency_b1"]["median_ms"] / m["infer_latency_b1"]["median_ms"]
-    save_json(res, args.out or f"results/{args.name}.json")
+    save_json(res, outp)
 
 
 if __name__ == "__main__":

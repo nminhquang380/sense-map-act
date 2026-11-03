@@ -116,14 +116,15 @@ def model_fig(path, out, budget_ms):
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.6))
     labs = [MODE_LABEL.get(m["mode"], m["mode"]) for m in modes]
     cols = [GREY if m["mode"].startswith("cpu") else BLUE for m in modes]
-    best = int(np.argmin([m["train_step"]["median_ms"] for m in modes]))
+    tr = lambda m: m.get("train_ms_per_sample", m["train_step"]["median_ms"])
+    best = int(np.argmin([tr(m) for m in modes]))
     cols[best] = AQUA if not modes[best]["mode"].startswith("cpu") else cols[best]
-    for ax, key, xl in ((axes[0], "train_step", "Training step (ms, log)"),
+    for ax, key, xl in ((axes[0], "train_step", "Training time per sample (ms, log)"),
                         (axes[1], "infer_latency_b1", "Inference latency, batch 1 (ms, log)")):
-        v = [m[key]["median_ms"] for m in modes]
+        v = [tr(m) if key == "train_step" else m[key]["median_ms"] for m in modes]
         bars = ax.barh(labs[::-1], v[::-1], color=cols[::-1], height=0.6)
         sp = "train_speedup_vs_cpu" if key == "train_step" else "infer_speedup_vs_cpu"
-        bar_labels(ax, bars, [f"{x:,.1f} ms" + (f"  ({m[sp]:.0f}x)" if m.get(sp) and m[sp] > 1.5 else "")
+        bar_labels(ax, bars, [(f"{x:,.2f} ms" if x < 10 else f"{x:,.1f} ms") + (f"  ({m[sp]:.0f}x)" if m.get(sp) and m[sp] > 1.5 else "")
                               for x, m in zip(v, modes)][::-1])
         ax.set_xscale("log"); ax.set_xlim(min(v) / 2, max(v) * 12); ax.set_xlabel(xl)
         ax.grid(axis="y", visible=False)
